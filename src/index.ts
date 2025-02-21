@@ -7,6 +7,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
+import { OpenAPIV3 } from 'openapi-types';
 
 const server = new Server(
   {
@@ -19,6 +20,17 @@ const server = new Server(
     },
   }
 );
+
+// Types for our OpenAPI handling
+interface OpenAPIEndpoint {
+  path: string;
+  method: string;
+  operationId: string;
+  description: string;
+  parameters?: OpenAPIV3.ParameterObject[];
+  requestBody?: OpenAPIV3.RequestBodyObject;
+  responses?: OpenAPIV3.ResponsesObject;
+}
 
 // Helper function for API calls
 async function coolifyApiCall(endpoint: string, method: string = 'GET', body?: any): Promise<any> {
@@ -76,204 +88,126 @@ const ApplicationUpdateSchema = z.object({
   domains: z.string().optional(),
 });
 
-// Set up request handlers
+// Function to fetch and parse OpenAPI spec
+async function fetchOpenAPISpec(): Promise<OpenAPIV3.Document> {
+  const specUrl = process.env.COOLIFY_OPENAPI_URL;
+  if (!specUrl) {
+    throw new Error('COOLIFY_OPENAPI_URL environment variable is not set');
+  }
+
+  const response = await fetch(specUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch OpenAPI spec: ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
+// Function to extract endpoints from OpenAPI spec
+async function parseOpenAPISpec(): Promise<OpenAPIEndpoint[]> {
+  const spec = await fetchOpenAPISpec();
+  const endpoints: OpenAPIEndpoint[] = [];
+  for (const [path, pathItem] of Object.entries(spec.paths)) {
+    if (!pathItem) continue;
+    for (const [method, operation] of Object.entries(pathItem as OpenAPIV3.PathItemObject)) {
+      if (method === 'parameters' || !operation || typeof operation !== 'object' || !('operationId' in operation)) continue;
+
+      endpoints.push({
+        path,
+        method: method.toUpperCase(),
+        operationId: operation.operationId || `${method}${path}`,
+        description: operation.description || operation.summary || '',
+        parameters: operation.parameters?.filter((p): p is OpenAPIV3.ParameterObject => !('$ref' in p)),
+        requestBody: ('$ref' in (operation.requestBody || {})) ? undefined : operation.requestBody as OpenAPIV3.RequestBodyObject,
+        responses: operation.responses
+      });
+    }
+  }
+
+  return endpoints;
+}
+
+// Helper function to convert OpenAPI parameters to Zod schema
+function parametersToZodSchema(endpoint: OpenAPIEndpoint): z.ZodType {
+  const schemaMap: Record<string, z.ZodType> = {};
+
+  // Handle path parameters
+  endpoint.parameters?.forEach(param => {
+    if (param.in === 'path' || param.in === 'query') {
+      schemaMap[param.name] = param.required 
+        ? z.string().describe(param.description || '')
+        : z.string().optional().describe(param.description || '');
+    }
+  });
+
+  // Handle request body if present
+  if (endpoint.requestBody) {
+    const content = endpoint.requestBody.content['application/json'];
+    if (content?.schema) {
+      // Here you would need to implement a function to convert OpenAPI schema to Zod
+      // For now, we'll use a simple any schema
+      schemaMap.body = z.any();
+    }
+  }
+
+  return z.object(schemaMap);
+}
+
+// Initialize server with dynamic tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
+  const endpoints = await parseOpenAPISpec();
+  
   return {
-    tools: [
-      {
-        name: "list-resources",
-        description: "Retrieve a comprehensive list of all resources managed by Coolify. This includes applications, services, databases, and deployments.",
-        inputSchema: zodToJsonSchema(z.object({})),
-      },
-      {
-        name: "list-applications",
-        description: "Fetch a list of all applications currently managed by Coolify. This provides an overview of all deployed applications.",
-        inputSchema: zodToJsonSchema(z.object({})),
-      },
-      {
-        name: "get-application",
-        description: "Retrieve detailed information about a specific application using its UUID. This includes the application's status, configuration, and deployment details.",
-        inputSchema: zodToJsonSchema(UuidSchema),
-      },
-      {
-        name: "start-application",
-        description: "Start a specific application using its UUID. This initiates the application and makes it available for use.",
-        inputSchema: zodToJsonSchema(UuidSchema),
-      },
-      {
-        name: "stop-application",
-        description: "Stop a specific application using its UUID. This halts the application and makes it unavailable.",
-        inputSchema: zodToJsonSchema(UuidSchema),
-      },
-      {
-        name: "restart-application",
-        description: "Restart a specific application using its UUID. This stops and then starts the application, applying any configuration changes.",
-        inputSchema: zodToJsonSchema(UuidSchema),
-      },
-      {
-        name: "list-services",
-        description: "Retrieve a list of all services managed by Coolify. This includes external services and microservices.",
-        inputSchema: zodToJsonSchema(z.object({})),
-      },
-      {
-        name: "list-databases",
-        description: "Fetch a list of all databases managed by Coolify. This provides an overview of all database instances.",
-        inputSchema: zodToJsonSchema(z.object({})),
-      },
-      {
-        name: "list-deployments",
-        description: "Retrieve a list of all running deployments in Coolify. This includes details about the deployment status and history.",
-        inputSchema: zodToJsonSchema(z.object({})),
-      },
-      {
-        name: "deploy",
-        description: "Deploy an application or service using a tag or UUID. This allows you to deploy new versions or updates to your applications.",
-        inputSchema: zodToJsonSchema(DeploySchema),
-      },
-      {
-        name: "update-application",
-        description: "Update the settings of a specific application, such as health check configurations. This allows you to modify the application's behavior and monitoring settings.",
-        inputSchema: zodToJsonSchema(z.object({
-          uuid: z.string().describe("Resource UUID"),
-          settings: ApplicationUpdateSchema
-        })),
-      },
-      // Additional tools can be added here
-    ],
+    tools: endpoints.map(endpoint => ({
+      name: endpoint.operationId,
+      description: endpoint.description,
+      inputSchema: zodToJsonSchema(parametersToZodSchema(endpoint))
+    }))
   };
 });
 
+// Handle API calls dynamically
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
-    switch (request.params.name) {
-      case "list-resources": {
-        const resources = await coolifyApiCall('/resources');
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(resources, null, 2)
-          }]
-        };
-      }
-
-      case "list-applications": {
-        const apps = await coolifyApiCall('/applications');
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(apps, null, 2)
-          }]
-        };
-      }
-
-      case "get-application": {
-        const { uuid } = UuidSchema.parse(request.params.arguments);
-        const app = await coolifyApiCall(`/applications/${uuid}`);
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(app, null, 2)
-          }]
-        };
-      }
-
-      case "start-application": {
-        const { uuid } = UuidSchema.parse(request.params.arguments);
-        const result = await coolifyApiCall(`/applications/${uuid}/start`);
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(result, null, 2)
-          }]
-        };
-      }
-
-      case "stop-application": {
-        const { uuid } = UuidSchema.parse(request.params.arguments);
-        const result = await coolifyApiCall(`/applications/${uuid}/stop`);
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(result, null, 2)
-          }]
-        };
-      }
-
-      case "update-application": {
-        const { uuid, settings } = request.params.arguments as { uuid: string; settings: any };
-        const result = await coolifyApiCall(`/applications/${uuid}`, 'PATCH', settings);
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(result, null, 2)
-          }]
-        };
-      }
-
-      case "restart-application": {
-        const { uuid } = UuidSchema.parse(request.params.arguments);
-        const result = await coolifyApiCall(`/applications/${uuid}/restart`);
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(result, null, 2)
-          }]
-        };
-      }
-
-      case "list-services": {
-        const services = await coolifyApiCall('/services');
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(services, null, 2)
-          }]
-        };
-      }
-
-      case "list-databases": {
-        const databases = await coolifyApiCall('/databases');
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(databases, null, 2)
-          }]
-        };
-      }
-
-      case "list-deployments": {
-        const deployments = await coolifyApiCall('/deployments');
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(deployments, null, 2)
-          }]
-        };
-      }
-
-      case "deploy": {
-        const params = DeploySchema.parse(request.params.arguments);
-        const queryParams = new URLSearchParams();
-        if (params.tag) queryParams.append('tag', params.tag);
-        if (params.uuid) queryParams.append('uuid', params.uuid);
-        if (params.force) queryParams.append('force', 'true');
-
-        const result = await coolifyApiCall(`/deploy?${queryParams.toString()}`);
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(result, null, 2)
-          }]
-        };
-      }
-
-      default:
-        throw new Error(`Unknown tool: ${request.params.name}`);
+    const endpoints = await parseOpenAPISpec();
+    const endpoint = endpoints.find(e => e.operationId === request.params.name);
+    
+    if (!endpoint) {
+      throw new Error(`Unknown tool: ${request.params.name}`);
     }
+
+    // Parse the arguments
+    const args = request.params.arguments as Record<string, any>;
+    
+    // Replace path parameters
+    let path = endpoint.path;
+    endpoint.parameters?.forEach(param => {
+      if (param.in === 'path') {
+        const paramValue = args[param.name];
+        if (!paramValue) {
+          throw new Error(`Missing required path parameter: ${param.name}`);
+        }
+        path = path.replace(`{${param.name}}`, paramValue);
+      }
+    });
+
+    // Extract body from args if it exists
+    const body = endpoint.requestBody ? args : undefined;
+
+    // Make the API call
+    const result = await coolifyApiCall(
+      path,
+      endpoint.method,
+      body
+    );
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(result, null, 2)
+      }]
+    };
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      throw new Error(`Invalid input: ${JSON.stringify(error.errors)}`);
-    }
     throw error;
   }
 });
