@@ -37,6 +37,12 @@ async function coolifyApiCall(endpoint: string, method: string = 'GET', body?: a
   const baseUrl = process.env.COOLIFY_BASE_URL?.replace(/\/$/, '') || 'https://coolify.stuartmason.co.uk';
   const url = `${baseUrl}/api/v1${endpoint}`;
 
+  console.error('Debug - API Call:', {
+    url,
+    method,
+    body: body ? JSON.stringify(body, null, 2) : undefined,
+  });
+
   const response = await fetch(url, {
     method,
     headers: {
@@ -48,6 +54,11 @@ async function coolifyApiCall(endpoint: string, method: string = 'GET', body?: a
 
   if (!response.ok) {
     const errorBody = await response.json().catch(() => ({}));
+    console.error('Debug - API Error:', {
+      status: response.status,
+      statusText: response.statusText,
+      errorBody,
+    });
     throw new Error(JSON.stringify({
       error: `Coolify API error: ${response.status} ${response.statusText}`,
       status: response.status,
@@ -55,7 +66,9 @@ async function coolifyApiCall(endpoint: string, method: string = 'GET', body?: a
     }));
   }
 
-  return await response.json();
+  const responseData = await response.json();
+  console.error('Debug - API Response:', responseData);
+  return responseData;
 }
 
 // Schema Definitions
@@ -158,11 +171,30 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   const endpoints = await parseOpenAPISpec();
   
   return {
-    tools: endpoints.map(endpoint => ({
-      name: endpoint.operationId,
-      description: endpoint.description,
-      inputSchema: zodToJsonSchema(parametersToZodSchema(endpoint))
-    }))
+    tools: endpoints.map(endpoint => {
+      // Create schema object with path parameters as top-level arguments
+      const schemaObj: Record<string, z.ZodType> = {};
+      
+      // Add path parameters first
+      endpoint.parameters?.forEach(param => {
+        if (param.in === 'path') {
+          schemaObj[param.name] = z.string().describe(
+            `${param.description || ''} (Required path parameter)`
+          );
+        }
+      });
+
+      // Add body if endpoint has a request body
+      if (endpoint.requestBody) {
+        schemaObj.body = z.any().describe('Request body payload');
+      }
+
+      return {
+        name: endpoint.operationId,
+        description: endpoint.description,
+        inputSchema: zodToJsonSchema(z.object(schemaObj))
+      };
+    })
   };
 });
 
@@ -176,29 +208,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       throw new Error(`Unknown tool: ${request.params.name}`);
     }
 
-    // Parse the arguments
-    const args = request.params.arguments as Record<string, any>;
-    
-    // Replace path parameters
+    // Only try to parse body if it exists
+    const parsedBody = request.params.arguments?.body 
+      ? JSON.parse(request.params.arguments.body as string) 
+      : {};
+
+    console.error('Parsed body:', parsedBody);
+
+    // Get the path with parameter replaced
     let path = endpoint.path;
-    endpoint.parameters?.forEach(param => {
-      if (param.in === 'path') {
-        const paramValue = args[param.name];
-        if (!paramValue) {
-          throw new Error(`Missing required path parameter: ${param.name}`);
-        }
-        path = path.replace(`{${param.name}}`, paramValue);
-      }
+    if (parsedBody.uuid) {
+      path = path.replace('{uuid}', parsedBody.uuid);
+      delete parsedBody.uuid;
+    }
+
+    console.error('Request:', {
+      path,
+      method: endpoint.method,
+      remainingBody: parsedBody
     });
 
-    // Extract body from args if it exists
-    const body = endpoint.requestBody ? args : undefined;
-
-    // Make the API call
     const result = await coolifyApiCall(
       path,
       endpoint.method,
-      body
+      endpoint.method !== 'GET' ? parsedBody : undefined
     );
 
     return {
@@ -208,6 +241,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }]
     };
   } catch (error) {
+    console.error('Error:', error);
     throw error;
   }
 });
