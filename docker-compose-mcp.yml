@@ -1,0 +1,21 @@
+services:
+  supabase-mcp:
+    image: node:20-slim
+    working_dir: /app
+    volumes:
+      - ./supabase-mcp:/app
+    ports:
+      - "3000:3000"
+    command: >
+      bash -c "
+        apt-get update && 
+        apt-get install -y git && 
+        git clone https://github.com/supabase-community/supabase-mcp.git . &&
+        npm install &&
+        echo 'SUPABASE_URL=http://supabasekong-akowwgwwwwcwossg4cgwk0ok.m2w.io:8000' > .env &&
+        echo 'SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0' >> .env &&
+        npm start
+      "
+    environment:
+      - SUPABASE_URL=http://supabasekong-akowwgwwwwcwossg4cgwk0ok.m2w.io:8000
+      - SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0

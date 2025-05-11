@@ -1,0 +1,100 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile_inline: |
+        FROM python:3.11-slim
+        
+        WORKDIR /app
+        
+        RUN apt-get update && apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            && rm -rf /var/lib/apt/lists/*
+        
+        RUN useradd -m -u 1000 appuser && \
+            mkdir -p /app/logs && \
+            chown -R appuser:appuser /app
+        
+        COPY --chown=appuser:appuser requirements.txt .
+        RUN pip install --no-cache-dir -r requirements.txt gunicorn
+        
+        COPY --chown=appuser:appuser . .
+        
+        # Create .env file with Supabase credentials
+        RUN echo "ENV_MODE=production" > .env \
+            && echo "REDIS_HOST=redis" >> .env \
+            && echo "REDIS_PORT=6379" >> .env \
+            && echo "REDIS_PASSWORD=" >> .env \
+            && echo "REDIS_SSL=False" >> .env \
+            && echo "SUPABASE_URL=http://supabasekong-akowwgwwwwcwossg4cgwk0ok.m2w.io:8000" >> .env \
+            && echo "SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0" >> .env \
+            && echo "OPENAI_API_KEY=your_openai_api_key" >> .env
+        
+        USER appuser
+        
+        CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile_inline: |
+        FROM node:20-slim
+
+        WORKDIR /app
+
+        COPY package*.json ./
+
+        RUN apt-get update && apt-get install -y --no-install-recommends \
+            python3 \
+            make \
+            g++ \
+            build-essential \
+            pkg-config \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libjpeg-dev \
+            libgif-dev \
+            librsvg2-dev \
+            && rm -rf /var/lib/apt/lists/*
+
+        RUN npm install
+
+        COPY . .
+
+        # Create .env.local file with Supabase credentials
+        RUN echo "NEXT_PUBLIC_SUPABASE_URL=http://supabasekong-akowwgwwwwcwossg4cgwk0ok.m2w.io:8000" > .env.local \
+            && echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0" >> .env.local
+
+        # Set environment variables
+        ENV NODE_ENV=development
+        ENV NEXT_PUBLIC_SUPABASE_URL=http://supabasekong-akowwgwwwwcwossg4cgwk0ok.m2w.io:8000
+        ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+
+        # Skip the build step and use development mode
+        CMD ["npm", "run", "dev"]
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  redis-data:
